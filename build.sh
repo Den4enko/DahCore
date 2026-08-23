@@ -14,12 +14,12 @@ BASE_PKGS=(
 
 # Cockpit web management
 COCKPIT_PKGS=(
-    cockpit-ws
-    cockpit-system
+    cockpit
+    cockpit-files
     cockpit-machines
+    cockpit-networkmanager
     cockpit-podman
     cockpit-storaged
-    cockpit-networkmanager
 )
 
 # Hardware & Diagnostics
