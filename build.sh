@@ -62,6 +62,7 @@ CLI_PKGS=(
     fastfetch
     bash-completion
     ncdu
+    wireguard-tools
 )
 
 # Install packages
