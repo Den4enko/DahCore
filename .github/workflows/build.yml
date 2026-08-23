@@ -25,12 +25,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Buildah
-        run: sudo apt-get update && sudo apt-get install -y buildah
-
       - name: Log in to Registry
         if: github.event_name != 'pull_request'
-        uses: redhat-actions/podman-login@v1
+        uses: redhat-actions/podman-login@v2
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -38,17 +35,24 @@ jobs:
 
       - name: Build Image with Buildah
         id: build-image
-        uses: redhat-actions/buildah-build@v2
+        uses: redhat-actions/buildah-build@v3
         with:
           image: ${{ env.IMAGE_NAME }}
           tags: latest ${{ github.ref_name }}
           containerfiles: |
             ./Containerfile
 
+      - name: Lowercase Registry Owner
+        id: registry_meta
+        run: |
+          echo "owner=${OWNER,,}" >> $GITHUB_OUTPUT
+        env:
+          OWNER: '${{ github.repository_owner }}'
+
       - name: Push to Registry
         if: github.event_name != 'pull_request'
-        uses: redhat-actions/push-to-registry@v2
+        uses: redhat-actions/push-to-registry@v3
         with:
           image: ${{ steps.build-image.outputs.image }}
           tags: ${{ steps.build-image.outputs.tags }}
-          registry: ${{ env.REGISTRY }}/${{ github.repository_owner }}
+          registry: ${{ env.REGISTRY }}/${{ steps.registry_meta.outputs.owner }}
