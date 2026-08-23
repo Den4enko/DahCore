@@ -4,9 +4,6 @@ set -euo pipefail
 # Update base system
 dnf upgrade -y
 
-# Enable repositories
-dnf install -y epel-release
-
 # Base system & containers
 BASE_PKGS=(
     podman

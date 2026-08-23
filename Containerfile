@@ -1,4 +1,4 @@
-FROM quay.io/almalinuxorg/almalinux-bootc:10
+FROM quay.io/fedora/fedora-bootc:44
 
 LABEL org.opencontainers.image.title="DahCore" \
       org.opencontainers.image.description="Minimal, immutable image-based OS for homelab servers" \
