@@ -1,0 +1,14 @@
+# OS & Editor artifacts
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+
+# Local build artifacts
+*.tar
+*.iso
+*.qcow2
+*.raw
+output/
+scratch/
