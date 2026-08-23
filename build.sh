@@ -73,5 +73,5 @@ systemctl enable cockpit.socket tuned.service smartd.service systemd-resolved.se
 
 # Clean cache, runtime artifacts, and unneeded state
 dnf clean all
-rm -rf /var/cache/* /var/log/* /var/tmp/* /tmp/* /run/* /var/lib/dnf
+rm -rf /var/cache/* /var/log/* /var/tmp/* /tmp/* /var/lib/dnf
 truncate -s 0 /etc/machine-id
