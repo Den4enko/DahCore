@@ -10,7 +10,7 @@ BASE_PKGS=(
     tuned
     systemd-resolved
     systemd-container
-    pcp
+    pcp-zeroconf
 )
 
 # Cockpit web management
@@ -73,6 +73,10 @@ dnf install -y \
 
 # Enable services
 systemctl enable cockpit.socket tuned.service smartd.service systemd-resolved.service
+
+# Disable services
+systemctl disable rpcbind.service
+systemctl mask systemd-remount-fs.service
 
 # Clean cache, runtime artifacts, and unneeded state
 dnf clean all
