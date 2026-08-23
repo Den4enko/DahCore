@@ -10,6 +10,7 @@ BASE_PKGS=(
     tuned
     systemd-resolved
     systemd-container
+    pcp
 )
 
 # Cockpit web management
@@ -19,7 +20,6 @@ COCKPIT_PKGS=(
     cockpit-machines
     cockpit-networkmanager
     cockpit-ostree
-    cockpit-pcp
     cockpit-podman
     cockpit-storaged
     cockpit-selinux
