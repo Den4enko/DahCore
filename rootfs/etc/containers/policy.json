@@ -6,6 +6,15 @@
     ],
     "transports": {
         "docker": {
+            "ghcr.io/den4enko/dahcore": [
+                {
+                    "type": "sigstoreSigned",
+                    "keyPath": "/etc/pki/containers/dahcore.pub",
+                    "signedIdentity": {
+                        "type": "matchRepository"
+                    }
+                }
+            ],
             "": [
                 {
                     "type": "insecureAcceptAnything"

@@ -50,9 +50,25 @@ jobs:
           OWNER: '${{ github.repository_owner }}'
 
       - name: Push to Registry
+        id: push-to-registry
         if: github.event_name != 'pull_request'
         uses: redhat-actions/push-to-registry@v3
         with:
           image: ${{ steps.build-image.outputs.image }}
           tags: ${{ steps.build-image.outputs.tags }}
           registry: ${{ env.REGISTRY }}/${{ steps.registry_meta.outputs.owner }}
+
+      - name: Install Cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@v4.1.0
+
+      - name: Sign DahCore Image
+        if: github.event_name != 'pull_request'
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          cosign sign --yes --tlog-upload=false --key env://COSIGN_PRIVATE_KEY \
+            --registry-username "${{ github.actor }}" \
+            --registry-password "${{ secrets.GITHUB_TOKEN }}" \
+            "${{ env.REGISTRY }}/${{ steps.registry_meta.outputs.owner }}/${{ env.IMAGE_NAME }}@${{ steps.push-to-registry.outputs.digest }}"

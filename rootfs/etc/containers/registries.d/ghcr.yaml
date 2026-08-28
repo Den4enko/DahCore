@@ -1,0 +1,3 @@
+docker:
+  ghcr.io/den4enko:
+    use-sigstore-attachments: true
