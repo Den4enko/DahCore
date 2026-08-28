@@ -60,7 +60,7 @@ jobs:
 
       - name: Install Cosign
         if: github.event_name != 'pull_request'
-        uses: sigstore/cosign-installer@v4.1.0
+        uses: sigstore/cosign-installer@v3
 
       - name: Sign DahCore Image
         if: github.event_name != 'pull_request'
