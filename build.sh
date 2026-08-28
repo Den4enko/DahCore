@@ -6,6 +6,7 @@ dnf upgrade -y
 
 # Base system & containers
 BASE_PKGS=(
+    openssh-server
     podman
     tuned
     systemd-resolved
@@ -73,7 +74,7 @@ dnf install -y \
     "${CLI_PKGS[@]}"
 
 # Enable services
-systemctl enable cockpit.socket tuned.service smartd.service systemd-resolved.service
+systemctl enable sshd.service cockpit.socket tuned.service smartd.service systemd-resolved.service
 
 # Disable services
 systemctl disable rpcbind.service
