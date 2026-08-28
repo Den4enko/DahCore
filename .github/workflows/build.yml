@@ -56,25 +56,3 @@ jobs:
           image: ${{ steps.build-image.outputs.image }}
           tags: ${{ steps.build-image.outputs.tags }}
           registry: ${{ env.REGISTRY }}/${{ steps.registry_meta.outputs.owner }}
-
-      - name: Build Container Installer
-        id: build-installer
-        if: github.event_name != 'pull_request'
-        uses: JasonN3/build-container-installer@v1.5.0
-        with:
-          arch: x86_64
-          image_name: ${{ env.IMAGE_NAME }}
-          image_repo: ${{ env.REGISTRY }}/${{ steps.registry_meta.outputs.owner }}
-          image_tag: latest
-          version: "44"
-          variant: Server
-          iso_name: ${{ env.IMAGE_NAME }}-latest.iso
-          image_signed: "false"
-
-      - name: Upload ISO Artifact
-        if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.IMAGE_NAME }}-iso
-          path: ${{ steps.build-installer.outputs.iso_name }}
-          if-no-files-found: warn

@@ -1,0 +1,62 @@
+name: Build ISO Installer
+
+on:
+  schedule:
+    - cron: '0 3 * * 1' # Every Monday at 03:00 UTC
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: dahcore
+  REGISTRY: ghcr.io
+
+jobs:
+  build-iso:
+    name: Build Container Installer ISO
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Lowercase Registry Owner
+        id: registry_meta
+        run: |
+          echo "owner=${OWNER,,}" >> $GITHUB_OUTPUT
+        env:
+          OWNER: '${{ github.repository_owner }}'
+
+      - name: Log in to Registry
+        uses: redhat-actions/podman-login@v2
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Container Installer
+        id: build-installer
+        uses: JasonN3/build-container-installer@v1.5.0
+        with:
+          arch: x86_64
+          image_name: ${{ env.IMAGE_NAME }}
+          image_repo: ${{ env.REGISTRY }}/${{ steps.registry_meta.outputs.owner }}
+          image_tag: latest
+          version: "44"
+          variant: Server
+          iso_name: ${{ env.IMAGE_NAME }}-latest.iso
+          image_signed: "false"
+
+      - name: Generate SHA256 Checksum
+        run: |
+          sha256sum "${{ steps.build-installer.outputs.iso_name }}" > "${{ steps.build-installer.outputs.iso_name }}.sha256"
+
+      - name: Upload ISO Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.IMAGE_NAME }}-iso
+          path: |
+            ${{ steps.build-installer.outputs.iso_name }}*
+          if-no-files-found: error
+          retention-days: 14
