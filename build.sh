@@ -41,6 +41,7 @@ HARDWARE_PKGS=(
     duperemove
     mdadm
     lvm2
+    zram-generator-defaults
 )
 
 # CLI Utilities
