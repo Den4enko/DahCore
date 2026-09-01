@@ -74,7 +74,7 @@ dnf install -y \
     "${CLI_PKGS[@]}"
 
 # Enable services
-systemctl enable sshd.service cockpit.socket tuned.service smartd.service systemd-resolved.service
+systemctl enable sshd.service cockpit.socket tuned.service smartd.service systemd-resolved.service bootc-fetch-apply-updates.timer
 
 # Disable services
 systemctl disable rpcbind.service
