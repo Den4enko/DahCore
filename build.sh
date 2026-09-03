@@ -14,6 +14,13 @@ BASE_PKGS=(
     pcp-zeroconf
 )
 
+# Virtualization (KVM & modular libvirt daemons)
+VIRT_PKGS=(
+    qemu-kvm
+    libvirt-daemon-kvm
+    libvirt-client
+)
+
 # Cockpit web management
 COCKPIT_PKGS=(
     cockpit
@@ -26,9 +33,10 @@ COCKPIT_PKGS=(
     cockpit-selinux
 )
 
-# Hardware & Diagnostics
+# Hardware, Firmware & Diagnostics
 HARDWARE_PKGS=(
     linux-firmware
+    iwlax2xx-firmware
     fwupd
     smartmontools
     lm_sensors
@@ -67,21 +75,29 @@ CLI_PKGS=(
     wireguard-tools
 )
 
-# Install packages
+# Install all packages
 dnf install -y \
     "${BASE_PKGS[@]}" \
+    "${VIRT_PKGS[@]}" \
     "${COCKPIT_PKGS[@]}" \
     "${HARDWARE_PKGS[@]}" \
     "${CLI_PKGS[@]}"
 
 # Enable services
-systemctl enable sshd.service cockpit.socket tuned.service smartd.service systemd-resolved.service bootc-fetch-apply-updates.timer
+systemctl enable \
+    sshd.service \
+    cockpit.socket \
+    tuned.service \
+    smartd.service \
+    systemd-resolved.service \
 
-# Disable services
-systemctl disable rpcbind.service
-systemctl mask systemd-remount-fs.service
+# Mask services
+systemctl mask \
+    rpcbind.service \
+    rpcbind.socket \
+    systemd-remount-fs.service
 
-# Clean cache, runtime artifacts, and unneeded state
+# Clean cache
 dnf clean all
-rm -rf /var/cache/* /var/log/* /var/tmp/* /tmp/* /var/lib/dnf
+rm -rf /var/cache/dnf /tmp/* /var/tmp/*
 truncate -s 0 /etc/machine-id
