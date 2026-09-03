@@ -36,7 +36,6 @@ COCKPIT_PKGS=(
 # Hardware, Firmware & Diagnostics
 HARDWARE_PKGS=(
     linux-firmware
-    iwlax2xx-firmware
     fwupd
     smartmontools
     lm_sensors
