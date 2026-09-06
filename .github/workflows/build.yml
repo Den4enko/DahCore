@@ -2,7 +2,7 @@ name: Build and Push DahCore Image
 
 on:
   schedule:
-    - cron: '0 3 * * 0' # Every Sunday at 03:00 UTC
+    - cron: '0 6 * * *' # Every day at 06:00 UTC
   push:
     branches: [ "main" ]
     tags: [ "v*" ]
