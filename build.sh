@@ -14,13 +14,6 @@ BASE_PKGS=(
     pcp-zeroconf
 )
 
-# Virtualization (KVM & modular libvirt daemons)
-VIRT_PKGS=(
-    qemu-kvm-core
-    libvirt-daemon-kvm
-    libvirt-client
-)
-
 # Cockpit web management
 COCKPIT_PKGS=(
     cockpit
@@ -75,9 +68,8 @@ CLI_PKGS=(
 )
 
 # Install all packages
-dnf install -y --setopt=install_weak_deps=False \
+dnf install -y \
     "${BASE_PKGS[@]}" \
-    "${VIRT_PKGS[@]}" \
     "${COCKPIT_PKGS[@]}" \
     "${HARDWARE_PKGS[@]}" \
     "${CLI_PKGS[@]}"
