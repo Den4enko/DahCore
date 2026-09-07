@@ -16,7 +16,7 @@ BASE_PKGS=(
 
 # Virtualization (KVM & modular libvirt daemons)
 VIRT_PKGS=(
-    qemu-kvm
+    qemu-kvm-core
     libvirt-daemon-kvm
     libvirt-client
 )
@@ -75,7 +75,7 @@ CLI_PKGS=(
 )
 
 # Install all packages
-dnf install -y \
+dnf install -y --setopt=install_weak_deps=False \
     "${BASE_PKGS[@]}" \
     "${VIRT_PKGS[@]}" \
     "${COCKPIT_PKGS[@]}" \
