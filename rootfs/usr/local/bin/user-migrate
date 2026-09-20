@@ -525,6 +525,11 @@ fi
 
 useradd -u "${SRC_UID}" -g "${SRC_GID}" -M -d "${SRC_HOME}" -s "${SRC_SHELL}" "${SRC_USER}"
 
+# useradd automatically assigns a subuid/subgid range if /etc/subuid exists.
+# We must clean up auto-assigned ranges and set the exact source ranges to prevent
+# duplicate or overlapping mappings that cause newuidmap to fail with "Invalid argument".
+touch /etc/subuid /etc/subgid
+sed -i -E "/^${SRC_USER}:/d" /etc/subuid /etc/subgid 2>/dev/null || true
 if [[ -n "${SRC_SUBUID_START}" ]] && [[ -n "${SRC_SUBUID_COUNT}" ]]; then
     echo "${SRC_USER}:${SRC_SUBUID_START}:${SRC_SUBUID_COUNT}" >> /etc/subuid
     echo "${SRC_USER}:${SRC_SUBGID_START}:${SRC_SUBGID_COUNT}" >> /etc/subgid
@@ -593,6 +598,7 @@ if [[ "${TARGET_LINGER}" == true ]]; then
 set -euo pipefail
 systemctl start "user@${SRC_UID}.service"
 sleep 2
+su - "${SRC_USER}" -c "podman system migrate" 2>/dev/null || true
 systemctl --machine="${SRC_USER}@.host" --user daemon-reload || true
 systemctl --machine="${SRC_USER}@.host" --user start default.target || true
 EOF
