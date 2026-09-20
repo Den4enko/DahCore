@@ -80,13 +80,16 @@ systemctl enable \
     cockpit.socket \
     tuned.service \
     smartd.service \
-    systemd-resolved.service \
+    systemd-resolved.service
 
 # Mask services
 systemctl mask \
     rpcbind.service \
     rpcbind.socket \
     systemd-remount-fs.service
+
+# Make user-migrate script executable
+chmod +x /usr/local/bin/user-migrate
 
 # Clean cache
 dnf clean all

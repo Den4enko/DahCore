@@ -1,0 +1,655 @@
+#!/usr/bin/env bash
+#
+# user-migrate
+#
+# Migrate a rootless user and their container/quadlet environment
+# between Fedora hosts.
+#
+
+set -euo pipefail
+
+PROGNAME="user-migrate"
+
+# Log helpers
+log()   { echo "==> $*"; }
+info()  { echo "${PROGNAME}: info: $*"; }
+warn()  { echo "${PROGNAME}: warning: $*" >&2; }
+error() { echo "${PROGNAME}: error: $*" >&2; }
+die()   { error "$*"; exit 1; }
+
+# Default parameters
+CLEANUP=false
+DRY_RUN=false
+SKIP_WARM_SYNC=false
+ASSUME_YES=false
+VERBOSE=false
+SSH_PORT=22
+SSH_KEY=""
+TARGET_SSH_USER="root"
+SSH_CONNECT_TIMEOUT=10
+
+usage() {
+    cat <<EOF
+Usage: ${PROGNAME} [OPTIONS] [USER] [TARGET_HOST]
+
+Migrate a rootless user and container environment between hosts.
+If USER or TARGET_HOST are omitted, an interactive menu will be presented.
+
+Arguments:
+  USER                  User to migrate (optional in interactive mode)
+  TARGET_HOST           Target host address (optional in interactive mode)
+
+Options:
+  -c, --cleanup         Remove user and home directory from source after migration
+  -d, --dry-run         Run pre-flight checks without modifying either host
+  -s, --skip-warm-sync  Stop services immediately and perform single sync
+  -p, --port <port>     SSH port on target host (default: 22)
+  -i, --identity <path> SSH private key file
+  --target-user <user>  SSH user on target host (default: root)
+  -y, --yes             Assume yes to all prompts (non-interactive)
+  -v, --verbose         Enable verbose output
+  -h, --help            Show this help text
+
+EOF
+    exit 0
+}
+
+# Parse options
+SRC_USER=""
+TARGET_HOST=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -c|--cleanup)
+            CLEANUP=true
+            shift
+            ;;
+        -d|--dry-run)
+            DRY_RUN=true
+            shift
+            ;;
+        -s|--skip-warm-sync)
+            SKIP_WARM_SYNC=true
+            shift
+            ;;
+        -y|--yes)
+            ASSUME_YES=true
+            shift
+            ;;
+        -v|--verbose)
+            VERBOSE=true
+            shift
+            ;;
+        -p|--port)
+            [[ -z "${2:-}" ]] && die "Option -p/--port requires an argument"
+            SSH_PORT="$2"
+            shift 2
+            ;;
+        -i|--identity)
+            [[ -z "${2:-}" ]] && die "Option -i/--identity requires an argument"
+            SSH_KEY="$2"
+            shift 2
+            ;;
+        --target-user)
+            [[ -z "${2:-}" ]] && die "Option --target-user requires an argument"
+            TARGET_SSH_USER="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            ;;
+        -*)
+            die "Unknown option: $1"
+            ;;
+        *)
+            if [[ -z "$SRC_USER" ]]; then
+                SRC_USER="$1"
+            elif [[ -z "$TARGET_HOST" ]]; then
+                TARGET_HOST="$1"
+            else
+                die "Unexpected extra argument: $1"
+            fi
+            shift
+            ;;
+    esac
+done
+
+# ------------------------------------------------------------------------------
+# Interactive Menu Selector (arrow keys, pure bash)
+# ------------------------------------------------------------------------------
+select_menu() {
+    local prompt="$1"
+    shift
+    local options=("$@")
+    local cur=0
+    local count=${#options[@]}
+    local key=""
+
+    # Trap to restore cursor on interrupt
+    trap 'echo -en "\033[?25h"; exit 1' INT TERM
+    echo -en "\033[?25l" # Hide cursor
+
+    while true; do
+        echo -e "\033[1m${prompt}\033[0m"
+        for i in "${!options[@]}"; do
+            if [[ $i -eq $cur ]]; then
+                echo -e "  \033[1;36m>\033[0m \033[1;7m ${options[$i]} \033[0m"
+            else
+                echo -e "    ${options[$i]}"
+            fi
+        done
+
+        IFS= read -rsn1 key
+        if [[ "$key" == $'\x1b' ]]; then
+            read -rsn2 -t 0.1 key || true
+            if [[ "$key" == "[A" ]]; then
+                ((cur > 0)) && ((cur--)) || cur=$((count - 1))
+            elif [[ "$key" == "[B" ]]; then
+                ((cur < count - 1)) && ((cur++)) || cur=0
+            fi
+        elif [[ "$key" == "" ]]; then
+            break
+        elif [[ "$key" == "q" || "$key" == "Q" ]]; then
+            echo -en "\033[?25h"
+            die "Aborted"
+        fi
+
+        # Move cursor back up to redraw menu
+        local lines_to_up=$((count + 1))
+        echo -en "\033[${lines_to_up}A\033[0J"
+    done
+
+    echo -en "\033[?25h" # Restore cursor
+    SELECTED_INDEX=$cur
+    SELECTED_VALUE="${options[$cur]}"
+}
+
+confirm_yn() {
+    local prompt="$1"
+    local default="${2:-y}"
+    if [[ "$ASSUME_YES" == true ]]; then
+        [[ "$default" == "y" ]] && return 0 || return 1
+    fi
+    local choice=""
+    if [[ "$default" == "y" ]]; then
+        read -r -p "$prompt [Y/n]: " choice
+        choice="${choice:-y}"
+    else
+        read -r -p "$prompt [y/N]: " choice
+        choice="${choice:-n}"
+    fi
+    case "$choice" in
+        [yY][eE][sS]|[yY]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Root privilege check before interactive discovery
+if [[ $EUID -ne 0 ]]; then
+    die "Must be run as root"
+fi
+
+# ------------------------------------------------------------------------------
+# Interactive Host and User Selection
+# ------------------------------------------------------------------------------
+if [[ -z "$TARGET_HOST" ]]; then
+    if [[ ! -t 0 ]]; then
+        die "Interactive mode requires a terminal. Specify USER and TARGET_HOST via command line."
+    fi
+
+    HOST_OPTIONS=()
+    if [[ -f /root/.ssh/config ]]; then
+        while read -r line; do
+            h=$(echo "$line" | awk '{print $2}')
+            [[ "$h" != "*" && "$h" != *[\?\*]* ]] && HOST_OPTIONS+=("$h")
+        done < <(grep -iE "^Host[[:space:]]+" /root/.ssh/config 2>/dev/null || true)
+    fi
+    if [[ -f /root/.ssh/known_hosts ]]; then
+        while read -r line; do
+            h=$(echo "$line" | awk '{print $1}' | cut -d, -f1)
+            [[ "$h" =~ ^\|1\| ]] && continue
+            h=$(echo "$h" | sed -E 's/^\[([^]]+)\](:[0-9]+)?$/\1/')
+            [[ -n "$h" ]] && HOST_OPTIONS+=("$h")
+        done < /root/.ssh/known_hosts
+    fi
+
+    readarray -t UNIQUE_HOSTS < <(echo "${HOST_OPTIONS[@]}" | tr ' ' '\n' | sort -u | grep -v "^$" || true)
+
+    MENU_ITEMS=()
+    [[ ${#UNIQUE_HOSTS[@]} -gt 0 ]] && MENU_ITEMS+=("${UNIQUE_HOSTS[@]}")
+    MENU_ITEMS+=("[Enter host manually]")
+
+    select_menu "Select target host:" "${MENU_ITEMS[@]}"
+    if [[ "$SELECTED_VALUE" == "[Enter host manually]" ]]; then
+        read -r -p "Target host (IP or hostname): " TARGET_HOST
+        [[ -z "$TARGET_HOST" ]] && die "No target host specified"
+    else
+        TARGET_HOST="$SELECTED_VALUE"
+    fi
+fi
+
+if [[ -z "$SRC_USER" ]]; then
+    if [[ ! -t 0 ]]; then
+        die "Interactive mode requires a terminal. Specify USER and TARGET_HOST via command line."
+    fi
+
+    USER_CANDIDATES=()
+    USER_NAMES=()
+    while IFS=: read -r u _ uid gid _ home shell; do
+        if [[ "$uid" -ge 1000 ]] && [[ "$home" =~ ^/home/ ]] || grep -q "^${u}:" /etc/subuid 2>/dev/null; then
+            has_quadlet="no"
+            [[ -d "${home}/.config/containers/systemd" ]] && has_quadlet="yes"
+            has_linger="no"
+            [[ -f "/var/lib/systemd/linger/${u}" ]] && has_linger="yes"
+
+            USER_NAMES+=("$u")
+            USER_CANDIDATES+=("${u} (UID: ${uid}, quadlet: ${has_quadlet}, linger: ${has_linger})")
+        fi
+    done < /etc/passwd
+
+    USER_MENU_ITEMS=()
+    [[ ${#USER_CANDIDATES[@]} -gt 0 ]] && USER_MENU_ITEMS+=("${USER_CANDIDATES[@]}")
+    USER_MENU_ITEMS+=("[Enter username manually]")
+
+    select_menu "Select user to migrate:" "${USER_MENU_ITEMS[@]}"
+    if [[ "$SELECTED_VALUE" == "[Enter username manually]" ]]; then
+        read -r -p "Username to migrate: " SRC_USER
+        [[ -z "$SRC_USER" ]] && die "No user specified"
+    else
+        SRC_USER="${USER_NAMES[$SELECTED_INDEX]}"
+    fi
+fi
+
+SSH_CMD=("ssh" "-p" "$SSH_PORT" "-o" "ConnectTimeout=${SSH_CONNECT_TIMEOUT}" "-o" "BatchMode=yes" "-o" "StrictHostKeyChecking=accept-new")
+[[ -n "$SSH_KEY" ]] && SSH_CMD+=("-i" "$SSH_KEY")
+TARGET_DEST="${TARGET_SSH_USER}@${TARGET_HOST}"
+
+run_target() {
+    if [[ "$TARGET_SSH_USER" == "root" ]]; then
+        "${SSH_CMD[@]}" "$TARGET_DEST" "$@"
+    else
+        "${SSH_CMD[@]}" "$TARGET_DEST" "sudo" "$@"
+    fi
+}
+
+# ------------------------------------------------------------------------------
+# 1. Source host pre-flight checks
+# ------------------------------------------------------------------------------
+log "Checking source host..."
+
+if ! id "$SRC_USER" &>/dev/null; then
+    die "User '${SRC_USER}' not found"
+fi
+
+SRC_UID=$(id -u "$SRC_USER")
+SRC_GID=$(id -g "$SRC_USER")
+SRC_GROUP=$(id -gn "$SRC_USER")
+SRC_HOME=$(getent passwd "$SRC_USER" | cut -d: -f6)
+SRC_SHELL=$(getent passwd "$SRC_USER" | cut -d: -f7)
+
+if [[ ! -d "$SRC_HOME" ]]; then
+    die "Home directory '${SRC_HOME}' does not exist"
+fi
+
+# Read subuid/subgid
+SRC_SUBUID_ENTRY=$(grep -E "^${SRC_USER}:" /etc/subuid | head -n1 || true)
+SRC_SUBGID_ENTRY=$(grep -E "^${SRC_USER}:" /etc/subgid | head -n1 || true)
+
+if [[ -z "$SRC_SUBUID_ENTRY" ]] || [[ -z "$SRC_SUBGID_ENTRY" ]]; then
+    warn "User '${SRC_USER}' has no /etc/subuid or /etc/subgid entries"
+    SRC_SUBUID_START=""
+    SRC_SUBUID_COUNT=""
+    SRC_SUBGID_START=""
+    SRC_SUBGID_COUNT=""
+else
+    SRC_SUBUID_START=$(echo "$SRC_SUBUID_ENTRY" | cut -d: -f2)
+    SRC_SUBUID_COUNT=$(echo "$SRC_SUBUID_ENTRY" | cut -d: -f3)
+    SRC_SUBGID_START=$(echo "$SRC_SUBGID_ENTRY" | cut -d: -f2)
+    SRC_SUBGID_COUNT=$(echo "$SRC_SUBGID_ENTRY" | cut -d: -f3)
+fi
+
+# Check linger
+SRC_LINGER=false
+if [[ -f "/var/lib/systemd/linger/${SRC_USER}" ]]; then
+    SRC_LINGER=true
+fi
+
+# Check active mounts inside home
+ACTIVE_MOUNTS=$(findmnt -l -n -o TARGET 2>/dev/null | grep -E "^${SRC_HOME}/" || true)
+if [[ -n "$ACTIVE_MOUNTS" ]]; then
+    error "Active mount point(s) detected inside '${SRC_HOME}':"
+    echo "$ACTIVE_MOUNTS" | while read -r m; do echo "  $m" >&2; done
+    die "Cannot migrate with active mounts inside home directory"
+fi
+
+# Check btrfs subvolumes inside home
+HOME_FSTYPE=$(findmnt -T "$SRC_HOME" -no FSTYPE 2>/dev/null || echo "")
+if [[ "$HOME_FSTYPE" == "btrfs" ]] && command -v btrfs &>/dev/null; then
+    BTRFS_SUBVOLS=$(btrfs subvolume list -o "$SRC_HOME" 2>/dev/null || true)
+    if [[ -n "$BTRFS_SUBVOLS" ]]; then
+        error "Btrfs subvolume(s) detected inside '${SRC_HOME}':"
+        echo "$BTRFS_SUBVOLS" >&2
+        die "Cannot migrate with btrfs subvolumes inside home directory"
+    fi
+fi
+
+# Inspect quadlet files for external mounts and ports
+QUADLET_DIR="${SRC_HOME}/.config/containers/systemd"
+DETECTED_PORTS=()
+if [[ -d "$QUADLET_DIR" ]]; then
+    while IFS= read -r -d '' qf; do
+        while IFS= read -r line; do
+            host_path=$(echo "$line" | sed -E 's/^[[:space:]]*Volume=([^:]+).*/\1/' | sed -E 's/.*-v[[:space:]]+([^:]+).*/\1/')
+            if [[ "$host_path" =~ ^/ ]] && [[ ! "$host_path" =~ \.volume$ ]]; then
+                if [[ "$host_path" != "$SRC_HOME"* ]]; then
+                    warn "Quadlet '$(basename "$qf")' references external path: ${host_path}"
+                fi
+            fi
+        done < <(grep -E '^[[:space:]]*(Volume=.*|-v[[:space:]]+)' "$qf" || true)
+
+        while IFS= read -r line; do
+            port=$(echo "$line" | sed -E 's/^[[:space:]]*PublishPort=([0-9]+).*/\1/')
+            [[ "$port" =~ ^[0-9]+$ ]] && DETECTED_PORTS+=("$port")
+        done < <(grep -E '^[[:space:]]*PublishPort=' "$qf" || true)
+    done < <(find "$QUADLET_DIR" -type f \( -name "*.container" -o -name "*.kube" \) -print0 2>/dev/null)
+fi
+
+SRC_SIZE_BYTES=$(du -sb "$SRC_HOME" 2>/dev/null | cut -f1 || du -sk "$SRC_HOME" | awk '{print $1 * 1024}')
+SRC_SIZE_HUMAN=$(du -sh "$SRC_HOME" 2>/dev/null | cut -f1 || echo "${SRC_SIZE_BYTES} bytes")
+
+# ------------------------------------------------------------------------------
+# 2. Target host pre-flight checks
+# ------------------------------------------------------------------------------
+log "Checking target host (${TARGET_HOST})..."
+
+if ! "${SSH_CMD[@]}" "$TARGET_DEST" "true" 2>/dev/null; then
+    die "Unable to connect to ${TARGET_DEST} via SSH"
+fi
+
+if [[ "$TARGET_SSH_USER" != "root" ]]; then
+    if ! run_target "true" 2>/dev/null; then
+        die "User '${TARGET_SSH_USER}' cannot execute sudo without password on target host. Configure passwordless sudo (NOPASSWD) in /etc/sudoers.d/."
+    fi
+fi
+
+REMOTE_CHECK_SCRIPT=$(cat <<EOF
+set -eu
+USER_EXISTS=0
+UID_EXISTS=0
+GID_EXISTS=0
+GID_NAME=""
+
+if id "${SRC_USER}" &>/dev/null; then
+    USER_EXISTS=1
+fi
+
+if getent passwd "${SRC_UID}" &>/dev/null; then
+    UID_EXISTS=1
+    UID_USER=\$(getent passwd "${SRC_UID}" | cut -d: -f1)
+else
+    UID_USER=""
+fi
+
+if getent group "${SRC_GID}" &>/dev/null; then
+    GID_EXISTS=1
+    GID_NAME=\$(getent group "${SRC_GID}" | cut -d: -f1)
+fi
+
+echo "USER_EXISTS=\$USER_EXISTS"
+echo "UID_EXISTS=\$UID_EXISTS"
+echo "UID_USER=\$UID_USER"
+echo "GID_EXISTS=\$GID_EXISTS"
+echo "GID_NAME=\$GID_NAME"
+EOF
+)
+
+eval "$(run_target "bash -s" <<< "$REMOTE_CHECK_SCRIPT")"
+
+if [[ "$USER_EXISTS" -eq 1 ]]; then
+    die "User '${SRC_USER}' already exists on target host"
+fi
+
+if [[ "$UID_EXISTS" -eq 1 ]]; then
+    die "UID ${SRC_UID} is already in use by '${UID_USER}' on target host"
+fi
+
+if [[ "$GID_EXISTS" -eq 1 ]] && [[ "$GID_NAME" != "$SRC_GROUP" ]]; then
+    die "GID ${SRC_GID} is already in use by group '${GID_NAME}' on target host"
+fi
+
+# Check subuid/subgid overlap on target
+if [[ -n "$SRC_SUBUID_START" ]] && [[ -n "$SRC_SUBUID_COUNT" ]]; then
+    CHECK_SUBID_SCRIPT=$(cat <<EOF
+set -eu
+check_overlap() {
+    local file="\$1"
+    local type="\$2"
+    local req_start=\$3
+    local req_count=\$4
+    local req_end=\$(( req_start + req_count - 1 ))
+
+    [[ ! -f "\$file" ]] && return 0
+
+    while IFS=: read -r name start count; do
+        [[ -z "\$name" || "\$name" =~ ^# ]] && continue
+        local end=\$(( start + count - 1 ))
+        local max_start=\$(( req_start > start ? req_start : start ))
+        local min_end=\$(( req_end < end ? req_end : end ))
+        if [[ \$max_start -le \$min_end ]]; then
+            echo "\$type:\$name:\$start:\$count"
+            return 1
+        fi
+    done < "\$file"
+    return 0
+}
+
+check_overlap /etc/subuid "subuid" $SRC_SUBUID_START $SRC_SUBUID_COUNT || true
+check_overlap /etc/subgid "subgid" $SRC_SUBGID_START $SRC_SUBGID_COUNT || true
+EOF
+)
+    SUBID_CONFLICT=$(run_target "bash -s" <<< "$CHECK_SUBID_SCRIPT")
+    if [[ -n "$SUBID_CONFLICT" ]]; then
+        error "SubUID/SubGID conflict on target host:"
+        echo "$SUBID_CONFLICT" | while IFS=: read -r type name start count; do
+            echo "  $type range overlaps with '${name}' (${start}:${count})" >&2
+        done
+        die "Conflicting subuid/subgid ranges on target host"
+    fi
+fi
+
+# Check target disk space
+TARGET_AVAIL_BYTES=$(run_target "df -B1 /home 2>/dev/null | tail -n1 | awk '{print \$4}'" || true)
+if [[ -n "$TARGET_AVAIL_BYTES" ]] && [[ "$TARGET_AVAIL_BYTES" =~ ^[0-9]+$ ]]; then
+    REQUIRED_BYTES=$(( SRC_SIZE_BYTES * 115 / 100 ))
+    if [[ "$TARGET_AVAIL_BYTES" -lt "$REQUIRED_BYTES" ]]; then
+        TARGET_AVAIL_HUMAN=$(run_target "df -h /home | tail -n1 | awk '{print \$4}'")
+        die "Insufficient space on target /home. Required: ~${SRC_SIZE_HUMAN}, Available: ${TARGET_AVAIL_HUMAN}"
+    fi
+fi
+
+# Check port availability on target
+if [[ ${#DETECTED_PORTS[@]} -gt 0 ]]; then
+    PORT_CHECK_SCRIPT=$(cat <<EOF
+set -eu
+for p in ${DETECTED_PORTS[*]}; do
+    if ss -tulpn 2>/dev/null | grep -q ":\$p "; then
+        echo "\$p"
+    fi
+done
+EOF
+)
+    USED_PORTS=$(run_target "bash -s" <<< "$PORT_CHECK_SCRIPT")
+    if [[ -n "$USED_PORTS" ]]; then
+        warn "Port(s) already in use on target host:"
+        echo "$USED_PORTS" | while read -r p; do echo "  - Port $p" >&2; done
+        if ! confirm_yn "Proceed despite port conflicts?" "n"; then
+            die "Aborted"
+        fi
+    fi
+fi
+
+# Dry run summary
+if [[ "$DRY_RUN" == true ]]; then
+    log "Dry-run completed successfully"
+    info "User: ${SRC_USER} (UID: ${SRC_UID}, GID: ${SRC_GID})"
+    info "SubUID/SubGID: ${SRC_SUBUID_START}:${SRC_SUBUID_COUNT}"
+    info "Linger: ${SRC_LINGER}"
+    info "Size: ${SRC_SIZE_HUMAN}"
+    info "Target: ${TARGET_DEST}:${SRC_HOME}"
+    exit 0
+fi
+
+# Prompt whether to enable linger and start services on target
+TARGET_LINGER="$SRC_LINGER"
+if confirm_yn "Enable linger and start services on target host?" "y"; then
+    TARGET_LINGER=true
+else
+    TARGET_LINGER=false
+fi
+
+if ! confirm_yn "Proceed with migration of '${SRC_USER}' to ${TARGET_HOST}?" "y"; then
+    die "Aborted"
+fi
+
+# ------------------------------------------------------------------------------
+# 3. Create target user environment
+# ------------------------------------------------------------------------------
+log "Creating user environment on target..."
+
+PREPARE_TARGET_SCRIPT=$(cat <<EOF
+set -euo pipefail
+
+if ! getent group "${SRC_GID}" &>/dev/null; then
+    groupadd -g "${SRC_GID}" "${SRC_GROUP}"
+fi
+
+useradd -u "${SRC_UID}" -g "${SRC_GID}" -M -d "${SRC_HOME}" -s "${SRC_SHELL}" "${SRC_USER}"
+
+if [[ -n "${SRC_SUBUID_START}" ]] && [[ -n "${SRC_SUBUID_COUNT}" ]]; then
+    echo "${SRC_USER}:${SRC_SUBUID_START}:${SRC_SUBUID_COUNT}" >> /etc/subuid
+    echo "${SRC_USER}:${SRC_SUBGID_START}:${SRC_SUBGID_COUNT}" >> /etc/subgid
+fi
+
+if [[ "${TARGET_LINGER}" == true ]]; then
+    loginctl enable-linger "${SRC_USER}"
+fi
+EOF
+)
+
+run_target "bash -s" <<< "$PREPARE_TARGET_SCRIPT"
+
+# ------------------------------------------------------------------------------
+# 4. Data synchronization
+# ------------------------------------------------------------------------------
+RSYNC_OPTS=(
+    "-aHAX"
+    "--numeric-ids"
+    "--exclude=.cache"
+    "--exclude=.local/share/containers/storage/overlay-containers/*/userdata"
+)
+[[ "$TARGET_SSH_USER" != "root" ]] && RSYNC_OPTS+=("--rsync-path=sudo rsync")
+[[ "$VERBOSE" == true ]] && RSYNC_OPTS+=("-v") || RSYNC_OPTS+=("--info=progress2")
+
+RSYNC_RSH="ssh -p ${SSH_PORT} -o ConnectTimeout=${SSH_CONNECT_TIMEOUT} -o StrictHostKeyChecking=accept-new"
+[[ -n "$SSH_KEY" ]] && RSYNC_RSH+=" -i ${SSH_KEY}"
+
+# Phase 1: Warm sync
+if [[ "$SKIP_WARM_SYNC" == false ]]; then
+    log "Performing warm sync..."
+    if su - "$SRC_USER" -c "command -v podman &>/dev/null" 2>/dev/null; then
+        su - "$SRC_USER" -c "podman image prune -f" &>/dev/null || true
+    fi
+
+    rsync -e "$RSYNC_RSH" "${RSYNC_OPTS[@]}" \
+        "${SRC_HOME}/" "${TARGET_DEST}:${SRC_HOME}/" || die "Warm sync failed"
+fi
+
+# Phase 2: Stop services
+log "Stopping services on source..."
+if systemctl is-active --quiet "user@${SRC_UID}.service" 2>/dev/null; then
+    systemctl --machine="${SRC_USER}@.host" --user stop default.target 2>/dev/null || true
+    systemctl stop "user@${SRC_UID}.service" 2>/dev/null || true
+fi
+
+if pgrep -u "$SRC_UID" &>/dev/null; then
+    pkill -u "$SRC_UID" 2>/dev/null || true
+    sleep 2
+    if pgrep -u "$SRC_UID" &>/dev/null; then
+        pkill -9 -u "$SRC_UID" 2>/dev/null || true
+    fi
+fi
+
+# Phase 3: Cold sync
+log "Performing cold sync..."
+rsync -e "$RSYNC_RSH" "${RSYNC_OPTS[@]}" --delete \
+    "${SRC_HOME}/" "${TARGET_DEST}:${SRC_HOME}/" || die "Cold sync failed"
+
+# ------------------------------------------------------------------------------
+# 5. Start and verify target services
+# ------------------------------------------------------------------------------
+if [[ "${TARGET_LINGER}" == true ]]; then
+    log "Starting services on target..."
+    STARTUP_SCRIPT=$(cat <<EOF
+set -euo pipefail
+systemctl start "user@${SRC_UID}.service"
+sleep 2
+systemctl --machine="${SRC_USER}@.host" --user daemon-reload || true
+systemctl --machine="${SRC_USER}@.host" --user start default.target || true
+EOF
+)
+    run_target "bash -s" <<< "$STARTUP_SCRIPT"
+
+    log "Verifying services on target..."
+    sleep 3
+
+    VERIFY_SCRIPT=$(cat <<EOF
+set -euo pipefail
+systemctl --machine="${SRC_USER}@.host" --user --failed --no-legend --plain 2>/dev/null || true
+EOF
+)
+    FAILED_UNITS=$(run_target "bash -s" <<< "$VERIFY_SCRIPT")
+
+    if [[ -n "$FAILED_UNITS" ]]; then
+        error "Failed services detected on target host:"
+        echo "$FAILED_UNITS" | while read -r line; do echo "  - $line" >&2; done
+        
+        if confirm_yn "Roll back (restart services on source)?" "y"; then
+            log "Rolling back source services..."
+            if [[ "$SRC_LINGER" == true ]]; then
+                systemctl start "user@${SRC_UID}.service" || true
+                systemctl --machine="${SRC_USER}@.host" --user start default.target || true
+            fi
+            warn "Services restored on source. Target user left intact for inspection."
+            exit 1
+        fi
+    fi
+
+    # Print target container table
+    run_target "su - ${SRC_USER} -c 'podman ps --format \"table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}\"' 2>/dev/null" || true
+else
+    info "Target services not started (linger disabled as requested)."
+fi
+
+# ------------------------------------------------------------------------------
+# 6. Post-migration cleanup
+# ------------------------------------------------------------------------------
+SHOULD_CLEANUP="$CLEANUP"
+if [[ "$SHOULD_CLEANUP" == false && "$ASSUME_YES" == false && -t 0 ]]; then
+    if confirm_yn "Delete user '${SRC_USER}' and all data on source host?" "n"; then
+        SHOULD_CLEANUP=true
+    fi
+fi
+
+if [[ "$SHOULD_CLEANUP" == true ]]; then
+    log "Removing user '${SRC_USER}' from source..."
+    if [[ "$SRC_LINGER" == true ]]; then
+        loginctl disable-linger "$SRC_USER" 2>/dev/null || true
+    fi
+    sed -i -E "/^${SRC_USER}:/d" /etc/subuid /etc/subgid 2>/dev/null || true
+    userdel -r -f "$SRC_USER" 2>/dev/null || true
+    info "User '${SRC_USER}' removed from source"
+else
+    info "Source user services remain stopped. Target is now active."
+fi
+
+log "Migration of '${SRC_USER}' completed"
