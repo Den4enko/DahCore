@@ -315,7 +315,8 @@ if [[ -f "/var/lib/systemd/linger/${SRC_USER}" ]]; then
 fi
 
 # Check active mounts inside home
-ACTIVE_MOUNTS=$(findmnt -l -n -o TARGET 2>/dev/null | grep -E "^${SRC_HOME}/" || true)
+SRC_HOME_REAL=$(realpath "$SRC_HOME" 2>/dev/null || echo "$SRC_HOME")
+ACTIVE_MOUNTS=$(findmnt -l -n -o TARGET 2>/dev/null | grep -E "^(${SRC_HOME}|${SRC_HOME_REAL})/" || true)
 if [[ -n "$ACTIVE_MOUNTS" ]]; then
     error "Active mount point(s) detected inside '${SRC_HOME}':"
     echo "$ACTIVE_MOUNTS" | while read -r m; do echo "  $m" >&2; done
@@ -325,10 +326,18 @@ fi
 # Check btrfs subvolumes inside home
 HOME_FSTYPE=$(findmnt -T "$SRC_HOME" -no FSTYPE 2>/dev/null || echo "")
 if [[ "$HOME_FSTYPE" == "btrfs" ]] && command -v btrfs &>/dev/null; then
-    BTRFS_SUBVOLS=$(btrfs subvolume list -o "$SRC_HOME" 2>/dev/null || true)
-    if [[ -n "$BTRFS_SUBVOLS" ]]; then
+    BTRFS_SUBVOLS=()
+    while IFS= read -r -d '' subvol_dir; do
+        if btrfs subvolume show "$subvol_dir" &>/dev/null; then
+            BTRFS_SUBVOLS+=("$subvol_dir")
+        fi
+    done < <(find "$SRC_HOME_REAL" -mindepth 1 -type d -inum 256 -print0 -prune 2>/dev/null)
+
+    if [[ ${#BTRFS_SUBVOLS[@]} -gt 0 ]]; then
         error "Btrfs subvolume(s) detected inside '${SRC_HOME}':"
-        echo "$BTRFS_SUBVOLS" >&2
+        for sv in "${BTRFS_SUBVOLS[@]}"; do
+            echo "  $sv" >&2
+        done
         die "Cannot migrate with btrfs subvolumes inside home directory"
     fi
 fi
