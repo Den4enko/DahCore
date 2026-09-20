@@ -549,7 +549,6 @@ run_target "bash -s" <<< "$PREPARE_TARGET_SCRIPT"
 RSYNC_OPTS=(
     "-aHAX"
     "--numeric-ids"
-    "--exclude=.cache"
     "--exclude=.local/share/containers/storage/overlay-containers/*/userdata"
 )
 [[ "$TARGET_SSH_USER" != "root" ]] && RSYNC_OPTS+=("--rsync-path=sudo rsync")
